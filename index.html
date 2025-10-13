@@ -573,7 +573,7 @@
                     const grid = document.getElementById('fileGrid');
                     grid.innerHTML = '';
 
-                    files.reverse();
+                    // حذف شده: files.reverse(); - حالا فایل‌ها به ترتیب اصلی نمایش داده می‌شوند
 
                     const cards = await Promise.all(files.map(f => createFileCard(f)));
                     cards.forEach(card => grid.appendChild(card));
