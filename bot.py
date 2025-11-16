@@ -19,6 +19,11 @@ from pyrogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, 
 # نصب uvloop برای افزایش سرعت event loop
 uvloop.install()
 
+# رفع خطای 'There is no current event loop'
+# با نصب uvloop، باید event loop را به صورت دستی ایجاد و تنظیم کنیم
+# قبل از اینکه کلاینت pyrogram نمونه‌سازی شود.
+asyncio.set_event_loop(asyncio.new_event_loop())
+
 # متغیرهای کنترل وضعیت برنامه
 running = True
 background_tasks = set()
@@ -363,6 +368,52 @@ def is_allowed_chat(chat_id):
     except Exception:
         return False
 
+def _get_download_details(message: Message) -> (str, str, str):
+    """
+    تعیین جزئیات دانلود فایل بر اساس نوع آن
+    """
+    file_type = "other"
+    file_name = ""
+    
+    media = message.document or message.video or message.audio or message.photo or message.voice
+
+    if isinstance(media, types.Document):
+        file_name = media.file_name
+        mime_type = media.mime_type or ""
+        if mime_type.startswith('image/'):
+            file_type = "image"
+        elif mime_type.startswith('audio/'):
+            file_type = "audio"
+        elif mime_type.startswith('video/'):
+            file_type = "video"
+        else:
+            file_type = "document"
+    elif isinstance(media, types.Photo):
+        file_type = "image"
+        file_name = f"photo_{media.file_unique_id}.jpg"
+    elif isinstance(media, types.Video):
+        file_type = "video"
+        file_name = media.file_name or f"video_{media.file_unique_id}.mp4"
+    elif isinstance(media, types.Audio):
+        file_type = "audio"
+        file_name = media.file_name or f"audio_{media.file_unique_id}.mp3"
+    elif isinstance(media, types.Voice):
+        file_type = "audio"
+        file_name = f"voice_{media.file_unique_id}.ogg"
+
+    # ایجاد پوشه مربوطه
+    target_dir = os.path.join(DOWNLOAD_PATH, file_type)
+    os.makedirs(target_dir, exist_ok=True)
+    
+    # مسیر کامل برای ذخیره فایل
+    full_path = os.path.join(target_dir, file_name)
+    
+    # مسیر نسبی برای URL
+    relative_path = os.path.join(file_type, file_name)
+    
+    return full_path, file_name, relative_path
+
+
 # تابع تولید لینک عمومی
 def build_public_url(file_name):
     """
@@ -393,11 +444,14 @@ def get_file_stats():
         files = []
         total_size = 0
         
-        for filename in os.listdir(DOWNLOAD_PATH):
-            file_path = os.path.join(DOWNLOAD_PATH, filename)
-            if os.path.isfile(file_path):
-                file_size = os.path.getsize(file_path)
-                file_age = time.time() - os.path.getmtime(file_path)
+        for dirpath, _, filenames in os.walk(DOWNLOAD_PATH):
+            for filename in filenames:
+                full_path = os.path.join(dirpath, filename)
+                relative_path = os.path.relpath(full_path, DOWNLOAD_PATH)
+                
+                file_size = os.path.getsize(full_path)
+                file_age = time.time() - os.path.getmtime(full_path)
+                
                 files.append({
                     'name': filename,
                     'size': file_size,
@@ -426,12 +480,14 @@ def update_config_file_list():
     """
     try:
         files = []
-        for filename in os.listdir(DOWNLOAD_PATH):
-            file_path = os.path.join(DOWNLOAD_PATH, filename)
-            if os.path.isfile(file_path):
-                size = os.path.getsize(file_path)
-                public_url = build_public_url(filename)
-                mtime = os.path.getmtime(file_path)
+        for dirpath, _, filenames in os.walk(DOWNLOAD_PATH):
+            for filename in filenames:
+                full_path = os.path.join(dirpath, filename)
+                relative_path = os.path.relpath(full_path, DOWNLOAD_PATH)
+                
+                size = os.path.getsize(full_path)
+                public_url = build_public_url(relative_path)
+                mtime = os.path.getmtime(full_path)
                 files.append({
                     'name': filename,
                     'size_bytes': size,
@@ -520,52 +576,27 @@ async def handle_file(client: Client, message: Message):
         )
         
         # تعیین نوع فایل و دانلود آن
-        file_path = None
-        file_name = None
+        download_target_path, file_name, relative_download_path = _get_download_details(message)
         
         # تابع دانلود که در Task جداگانه اجرا می‌شود
         async def do_download():
-            nonlocal file_path, file_name
             try:
-                if message.document:
-                    file_name = message.document.file_name
-                    file_path = await message.download(
-                        file_name=os.path.join(DOWNLOAD_PATH, file_name)
-                    )
-                elif message.photo:
-                    file_name = f"photo_{message.photo.file_unique_id}.jpg"
-                    file_path = await message.download(
-                        file_name=os.path.join(DOWNLOAD_PATH, file_name)
-                    )
-                elif message.video:
-                    file_name = message.video.file_name or f"video_{message.video.file_unique_id}.mp4"
-                    file_path = await message.download(
-                        file_name=os.path.join(DOWNLOAD_PATH, file_name)
-                    )
-                elif message.audio:
-                    file_name = message.audio.file_name or f"audio_{message.audio.file_unique_id}.mp3"
-                    file_path = await message.download(
-                        file_name=os.path.join(DOWNLOAD_PATH, file_name)
-                    )
-                elif message.voice:
-                    file_name = f"voice_{message.voice.file_unique_id}.ogg"
-                    file_path = await message.download(
-                        file_name=os.path.join(DOWNLOAD_PATH, file_name)
-                    )
-                
-                return file_path, file_name
+                # The download path is already determined. We just download.
+                # The message.download() function returns the final path, which should be the same as download_target_path.
+                final_path = await message.download(file_name=download_target_path)
+                return final_path, file_name, relative_download_path
             except asyncio.CancelledError:
                 raise
             except Exception as e:
                 raise e
-        
+
         # اجرای دانلود در Task جداگانه
         download_task = asyncio.create_task(do_download())
         download_manager.update_download(download_id, task=download_task)
         
         try:
             # منتظر تکمیل دانلود یا لغو آن
-            file_path, file_name = await download_task
+            file_path, file_name, relative_path = await download_task
             download_manager.update_download(download_id, file_path=file_path, file_name=file_name)
             
         except asyncio.CancelledError:
@@ -649,7 +680,7 @@ async def handle_file(client: Client, message: Message):
         speed_mbps = (file_size / download_duration) if download_duration > 0 else 0
         
         # تولید لینک عمومی
-        public_url = build_public_url(file_name)
+        public_url = build_public_url(relative_path)
         
         # نمایش پیام موفقیت با جزئیات و حذف پیام وضعیت قبلی
         try:
